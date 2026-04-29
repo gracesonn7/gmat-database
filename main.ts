@@ -17,6 +17,13 @@ export const CRAWLERS = {
   DS: `https://gmatclub.com/forum/search.php?selected_search_tags%5B%5D=180&selected_search_tags%5B%5D=222&selected_search_tags%5B%5D=223&t=0&search_tags=exact&submit=Search`,
 };
 
+const CHROME_CANDIDATES = [
+  "google-chrome",
+  "chromium-browser",
+  "chromium",
+  "chrome",
+];
+
 function getIdFromUrl(url: string) {
   if (url.endsWith(".html")) {
     url = url.slice(0, -5);
@@ -25,15 +32,90 @@ function getIdFromUrl(url: string) {
   return parts[parts.length - 1];
 }
 
-async function fetchAsDOM(url: string) {
-  const res = await fetch(url, {
-    headers: {
-      Cookie:
-        "timer.add_answer_without_start=1; __gads=ID=b739aae4d6b48673-2269dd2851d800dc:T=1668173889:RT=1668237859:S=ALNI_Mb8rPmrqYtwh0huRidypke96twdgw; cto_bundle=6SEQZV9JNEp3dXFlcFVTbmI5RkRiZlZaaUFzUWlWTExqJTJGWVIxeXVjMjNMNmFwTUc0QkhSUHpCbHBEQmZyVnpFWGNYMDhCYXlqVURpTGpXZXMxcThIVmlVbXBhT0hWUWNuRkpvd3J0M0xjeVlWWTdQJTJGS3pNMVhOUkRodnlXYkJrJTJGalJ3Sw; _ga=GA1.2.1131835118.1668173470; _gid=GA1.2.189743523.1668173470; PHPSESSID=qbvnqubotj2ipvvh9qppj55aol; acgroupswithpersist=nada; acopendivids=gc-spoiler; __gpi=UID=00000b7a00b2a9e5:T=1668173889:RT=1668233840:S=ALNI_MbL3pkzJ4tflrcudG-xs3Oev8pjQg; __utma=118473247.1131835118.1668173470.1668173565.1668173565.1; __utmz=118473247.1668173565.1.1.utmcsr=(direct)|utmccn=(direct)|utmcmd=(none)",
-    },
+function isChallengePage(text: string) {
+  return text.includes("Just a moment...") ||
+    text.includes("Enable JavaScript and cookies to continue");
+}
+
+async function findChromeBinary() {
+  for (const candidate of CHROME_CANDIDATES) {
+    try {
+      const command = new Deno.Command(candidate, {
+        args: ["--version"],
+        stdout: "null",
+        stderr: "null",
+      });
+      const { code } = await command.output();
+      if (code === 0) {
+        return candidate;
+      }
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) {
+        throw error;
+      }
+    }
+  }
+  return null;
+}
+
+async function fetchHtmlWithBrowser(url: string) {
+  const chrome = await findChromeBinary();
+  if (!chrome) {
+    return null;
+  }
+
+  console.warn(`>>> Falling back to ${chrome} for ${url}`);
+  const command = new Deno.Command(chrome, {
+    args: [
+      "--headless=new",
+      "--disable-gpu",
+      "--no-sandbox",
+      "--virtual-time-budget=15000",
+      "--dump-dom",
+      url,
+    ],
+    stdout: "piped",
+    stderr: "piped",
   });
-  const text = await res.text();
+  const { code, stdout, stderr } = await command.output();
+  if (code !== 0) {
+    throw new Error(
+      `${chrome} failed for ${url}: ${new TextDecoder().decode(stderr)}`
+    );
+  }
+
+  return new TextDecoder().decode(stdout);
+}
+
+async function fetchAsDOM(url: string) {
+  let text: string | null = null;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "Accept":
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+      },
+    });
+    const challenge = res.headers.get("cf-mitigated");
+    text = await res.text();
+    if (!res.ok || challenge === "challenge" || isChallengePage(text)) {
+      text = await fetchHtmlWithBrowser(url);
+    }
+  } catch {
+    text = await fetchHtmlWithBrowser(url);
+  }
+
+  if (!text || isChallengePage(text)) {
+    throw new Error(`GMAT Club returned an anti-bot challenge for ${url}`);
+  }
+
   const document = new DOMParser().parseFromString(text, "text/html");
+  if (!document) {
+    throw new Error(`Unable to parse HTML returned by ${url}`);
+  }
   return document!;
 }
 
@@ -56,6 +138,7 @@ async function crawlQuestion(
 }
 
 async function crawl() {
+  await Deno.mkdir("./output", { recursive: true });
   for (const key in CRAWLERS) {
     const questionType = key as keyof typeof CRAWLERS;
     const url = database[questionType].length
@@ -72,6 +155,11 @@ async function crawl() {
         };
       }
     );
+    if (!posts.length) {
+      throw new Error(
+        `No question links were found for ${questionType}. The crawler likely received an unexpected GMAT Club response.`
+      );
+    }
     for (const post of posts) {
       const questionUrl = post.href!;
       const id = getIdFromUrl(questionUrl);

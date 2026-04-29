@@ -31,8 +31,11 @@ try {
   const content = Deno.readTextFileSync("./output/index.json");
   Object.assign(database, JSON.parse(content));
 } catch (error) {
-  console.warn(">>> Cannot pickup pervious data. Init new database");
-  console.error(error);
+  if (error instanceof Deno.errors.NotFound) {
+    console.warn(">>> Cannot pickup pervious data. Init new database");
+  } else {
+    throw error;
+  }
 }
 
 export const report = Object.keys(database).map((key) => ({
