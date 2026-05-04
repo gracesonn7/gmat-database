@@ -156,9 +156,10 @@ async function crawl() {
       }
     );
     if (!posts.length) {
-      throw new Error(
-        `No question links were found for ${questionType}. The crawler likely received an unexpected GMAT Club response.`
+      console.warn(
+        `>>> No question links found for ${questionType}, skipping...`
       );
+      continue;
     }
     for (const post of posts) {
       const questionUrl = post.href!;
